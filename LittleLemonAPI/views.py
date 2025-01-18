@@ -2,14 +2,15 @@ from django.shortcuts import render
 from django.contrib.auth.models import User,Group
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status,generics,permissions
 from rest_framework.permissions import IsAuthenticated
-from .permissions import IsManager
+from .permissions import IsManager, IsCustomer,IsDeliveryCrew
 from rest_framework.decorators import permission_classes
-from .serializers import UserSerializer
-from .models import MenuItem, Cart
+from .serializers import UserSerializer,OrderSerializer, OrderItemSerializer
+from .models import MenuItem, Cart, Order, OrderItem
 from .serializers import MenuItemSerializer,CartSerializer
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.exceptions import PermissionDenied
 
 class ManagerGroupView(APIView):
     permission_classes=[IsAuthenticated,IsManager]
@@ -251,3 +252,144 @@ class CartManagementView(APIView):
         """
         Cart.objects.filter(user=request.user).delete()
         return Response({"message": "Cart cleared successfully"}, status=status.HTTP_200_OK)
+
+class OrderView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Check user role
+        user = request.user
+        if user.groups.filter(name="customer").exists():
+            # Customer: Return only their orders
+            orders = Order.objects.filter(user=user)
+        elif user.groups.filter(name="manager").exists():
+            # Manager: Return all orders
+            orders = Order.objects.all()
+        elif user.groups.filter(name="delivery-crew").exists():
+            # Delivery Crew: Return orders assigned to them
+            orders = Order.objects.filter(delivery_crew=user)
+        else:
+            # If user does not belong to any role, return an empty response
+            return Response({"detail": "No access for your role!"}, status=status.HTTP_403_FORBIDDEN)
+        
+        serializer = OrderSerializer(orders, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        cart_items = Cart.objects.filter(user=request.user)
+        if not cart_items.exists():
+            return Response({"detail": "Cart is empty!"}, status=status.HTTP_400_BAD_REQUEST)
+
+        total = sum(item.price for item in cart_items)
+        order = Order.objects.create(user=request.user, total=total)
+
+        order_items = [
+            OrderItem(
+                order=order,
+                menu_item=item.menu_item,
+                quantity=item.quantity,
+                unit_price=item.unit_price,
+                price=item.price
+            )
+            for item in cart_items
+        ]
+        OrderItem.objects.bulk_create(order_items)
+        cart_items.delete()
+
+        return Response({"detail": "Order created successfully!"}, status=status.HTTP_201_CREATED)
+
+class OrderDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, orderId):
+        """GET request - For customers to view their orders"""
+        try:
+            order = Order.objects.get(id=orderId, user=request.user)
+        except Order.DoesNotExist:
+            return Response({"detail": "Order not found or doesn't belong to the current user."}, status=status.HTTP_404_NOT_FOUND)
+
+        order_items = OrderItem.objects.filter(order=order)
+        order_items_data = OrderItemSerializer(order_items, many=True).data
+
+        return Response({
+            "order": OrderSerializer(order).data,
+            "order_items": order_items_data
+        }, status=status.HTTP_200_OK)
+
+    def put(self, request, orderId):
+        """PUT request - Manager can update order status and assign a delivery crew"""
+        if not request.user.groups.filter(name="manager").exists():
+            raise PermissionDenied("Only managers can update orders.")
+
+        try:
+            order = Order.objects.get(id=orderId)
+        except Order.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        delivery_crew = request.query_params.get("delivery_crew")  # Extract from query parameters
+        status_code = request.query_params.get("status")  # Extract from query parameters
+
+        # Validate delivery_crew
+        if delivery_crew:
+            try:
+                delivery_crew_user = User.objects.get(id=int(delivery_crew))
+                order.delivery_crew = delivery_crew_user
+            except User.DoesNotExist:
+                return Response({"detail": "Delivery crew user not found."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate and update status
+        if status_code:
+            try:
+                status_code = int(status_code)  # Convert to integer
+                if status_code not in (0, 1):
+                    return Response({"detail": "Invalid status. Status must be 0 (out for delivery) or 1 (delivered)."},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                order.status = status_code
+            except ValueError:
+                return Response({"detail": "Invalid status. Status must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+
+        order.save()
+
+        return Response({"detail": "Order updated successfully."}, status=status.HTTP_200_OK)
+
+    def patch(self, request, orderId):
+        """PATCH request - Delivery crew updates order status to 0 or 1"""
+        if not request.user.groups.filter(name="Delivery crew").exists():
+            raise PermissionDenied("Only delivery crew can update the order status.")
+
+        try:
+            order = Order.objects.get(id=orderId)
+        except Order.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Validate if delivery crew is assigned
+        if order.delivery_crew != request.user:
+            return Response({"detail": "This order is not assigned to you."}, status=status.HTTP_400_BAD_REQUEST)
+
+        status_code = request.data.get("status")
+
+        # Validate status
+        if status_code not in [0, 1]:
+            return Response({"detail": "Invalid status. Status must be 0 (out for delivery) or 1 (delivered)."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Update the order status
+        order.status = status_code
+        order.save()
+
+        return Response({"detail": "Order status updated successfully."}, status=status.HTTP_200_OK)
+
+    def delete(self, request, orderId):
+        """DELETE request - manager deletes an order"""
+        if not request.user.groups.filter(name="manager").exists():
+            raise PermissionDenied("Only managers can delete orders.")
+
+        try:
+            order = Order.objects.get(id=orderId)
+        except Order.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Delete order and related order items
+        order.delete()
+
+        return Response({"detail": "Order deleted successfully."}, status=status.HTTP_204_NO_CONTENT)

@@ -1,7 +1,23 @@
 from django.contrib.auth.models import User
 from rest_framework import serializers
 from .models import MenuItem
-from .models import Cart
+from .models import Cart, Order, OrderItem
+
+class OrderItemSerializer(serializers.ModelSerializer):
+    menu_item = serializers.StringRelatedField()
+
+    class Meta:
+        model = OrderItem
+        fields = ['id', 'menu_item', 'quantity', 'unit_price', 'price']
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    items = OrderItemSerializer(many=True, read_only=True, source='orderitem_set')
+    delivery_crew = serializers.StringRelatedField()
+
+    class Meta:
+        model = Order
+        fields = ['id', 'user', 'status', 'total', 'date', 'delivery_crew', 'items']
 
 class CartSerializer(serializers.ModelSerializer):
     class Meta:
