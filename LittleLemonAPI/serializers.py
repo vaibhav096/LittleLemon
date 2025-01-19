@@ -12,12 +12,12 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
 
 class OrderSerializer(serializers.ModelSerializer):
-    items = OrderItemSerializer(many=True, read_only=True, source='orderitem_set')
+    # items = OrderItemSerializer(many=True, read_only=True, source='orderitem_set')
     delivery_crew = serializers.StringRelatedField()
 
     class Meta:
         model = Order
-        fields = ['id', 'user', 'status', 'total', 'date', 'delivery_crew', 'items']
+        fields = ['id', 'user', 'status', 'total', 'date', 'delivery_crew']#'items'
 
 class CartSerializer(serializers.ModelSerializer):
     class Meta:
@@ -36,6 +36,7 @@ class CartSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 class MenuItemSerializer(serializers.ModelSerializer):
+    category=serializers.StringRelatedField()
     class Meta:
         model = MenuItem
         fields = ['id', 'title', 'price', 'featured', 'category']
